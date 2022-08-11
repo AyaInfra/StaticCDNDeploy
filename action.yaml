@@ -1,0 +1,158 @@
+name: Static CDN Deploy
+inputs:
+  deploy-credentials: { required: true }
+  remote-path: { required: false, default: "" }
+  local-path: { required: false, default: "" }
+  working-dir: { required: false, default: static-cdn-deploy }
+  incremental: { required: false, default: "true" }
+runs:
+  using: composite
+  steps:
+    - uses: Azure/login@v1
+      with:
+        creds: ${{ inputs.deploy-credentials }}
+    - uses: Azure/get-keyvault-secrets@v1
+      with:
+        keyvault: StaticCdnDeploySecrets
+        secrets: aliyun-oss-access-key-id,aliyun-oss-access-key-secret,aliyun-oss-bucket,aliyun-oss-endpoint,cloudflare-account-id,cloudflare-token,deploy-key-static-cdn,deploy-key-static-cdn-configuration
+      id: secrets
+    - name: Checkout CDN content
+      uses: actions/checkout@v2
+      with:
+        repository: AyaInfra/StaticCDN
+        ssh-key: ${{ steps.secrets.outputs.deploy-key-static-cdn }}
+        path: ${{ inputs.working-dir }}/content
+        ref: main
+    - name: Checkout CDN configuration
+      uses: actions/checkout@v2
+      with:
+        repository: AyaInfra/StaticCDNConfiguration
+        ssh-key: ${{ steps.secrets.outputs.deploy-key-static-cdn-configuration }}
+        path: ${{ inputs.working-dir }}/configuration
+        ref: main
+    - name: Update CDN content repo
+      shell: bash
+      run: |
+        if [[ "$LOCAL_PATH" != "" ]]; then
+          rm -rf -- "$WORKING_DIR/content/$REMOTE_PATH"
+          cp -r -- "$LOCAL_PATH" "$WORKING_DIR/content/$REMOTE_PATH"
+          rm -rf -- "$WORKING_DIR/content/$REMOTE_PATH/.git"
+        fi
+        cp -r "$WORKING_DIR/configuration"/* "$WORKING_DIR/content/"
+
+        cd "$WORKING_DIR/content"
+        if [[ "$(git status -s)" != "" ]]; then
+          git add .
+
+          MESSAGE="Update"
+          if [[ "$REMOTE_PATH" != "" ]]; then
+            MESSAGE="Update $REMOTE_PATH"
+          fi
+
+          git config user.name github-actions
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "$MESSAGE on $(date '+%Y-%m-%d %H:%M:%S')"
+
+          eval `ssh-agent -s`
+          echo "$DEPLOY_KEY" | tr -d '\r' | ssh-add -
+
+          PUSH_ATTEMPT="0"
+          while ! git push origin main; do
+            ((PUSH_ATTEMPT=PUSH_ATTEMPT+1))
+            if ! git pull --rebase; then
+              exit 1
+            fi
+            if [[ "$PUSH_ATTEMPT" == "5" ]]; then
+              exit 2
+            fi
+          done
+        fi
+
+        echo "::set-output commit-hash=$(git rev-parse HEAD)"
+      env:
+        TZ: Asia/Shanghai
+        LOCAL_PATH: ${{ inputs.local-path }}
+        REMOTE_PATH: ${{ inputs.remote-path }}
+        WORKING_DIR: ${{ inputs.working-dir }}
+        DEPLOY_KEY: ${{ steps.secrets.outputs.deploy-key-static-cdn }}
+      id: push-changes
+    - name: Await Cloudflare Deploy
+      uses: WalshyDev/cf-pages-await@v1.3.0
+      with:
+        accountId: ${{ steps.secrets.outputs.cloudflare-account-id }}
+        apiToken: ${{ steps.secrets.outputs.cloudflare-token }}
+        project: menci-static-cdn
+        commitHash: ${{ steps.push-changes.outputs.commit-hash }}
+    - name: Deploy to Aliyun
+      uses: Menci/upload-to-oss@main
+      with:
+        access-key-id: ${{ steps.secrets.outputs.aliyun-oss-access-key-id }}
+        access-key-secret: ${{ steps.secrets.outputs.aliyun-oss-access-key-secret }}
+        bucket: ${{ steps.secrets.outputs.aliyun-oss-bucket }}
+        endpoint: ${{ steps.secrets.outputs.aliyun-oss-endpoint }}
+        local-path: ${{ inputs.working-dir }}/content
+        remote-path: /
+        exclude-regex: ^_headers$|^\.git/?
+        headers: |
+          filename => {
+            const rules = (global.__headersRules = global.__headersRules || (() => {
+              const path = require("path");
+              const fs = require("fs");
+              const core = require("@actions/core");
+
+              const headersRuleFilePath = path.join(core.getInput("local-path"), "_headers");
+              if (!fs.existsSync(headersRuleFilePath)) return {};
+              const headersRuleFile = fs.readFileSync(headersRuleFilePath, "utf-8");
+              const headersRuleFileLines = headersRuleFile.split("\n").map(l => l.trimRight()).filter(l => l && !l.startsWith("#"));
+              const rules = {};
+
+              let currentPathMatcher = null;
+              let currentHeaders = {};
+              for (const line of headersRuleFileLines) {
+                const trimmedLine = line.trimLeft();
+                if (line === trimmedLine) {
+                  if (currentPathMatcher != null) {
+                    rules[currentPathMatcher] = currentHeaders;
+                  }
+                  currentPathMatcher = line;
+                  currentHeaders = {};
+                } else {
+                  if (trimmedLine.startsWith("!")) {
+                    currentHeaders[trimmedLine.slice(1).trim()] = null;
+                  } else {
+                    const colonPosition = trimmedLine.indexOf(":");
+                    if (colonPosition === -1) continue;
+                    currentHeaders[trimmedLine.slice(0, colonPosition).trim()] = trimmedLine.slice(colonPosition + 1).trim();
+                  }
+                }
+              }
+              if (currentPathMatcher != null) {
+                rules[currentPathMatcher] = currentHeaders;
+              }
+
+              return rules;
+            })());
+
+            function ruleToRegExp(rule) {
+              const escaped = rule.replace(/[.+?^${}()|[\]\\]/g, '\\$&');
+              return new RegExp("^" + escaped.split("*").join(".*") + "$");
+            }
+
+            const filePath = "/" + filename;
+            const headers = {};
+            for (const rule in rules) {
+              const ruleRegExp = ruleToRegExp(rule);
+              if (!ruleRegExp.test(filePath)) continue;
+              
+              const ruleHeaders = rules[rule];
+              for (const key in ruleHeaders) {
+                const value = ruleHeaders[key];
+                if (value == null) delete headers[key];
+                else headers[key] = value;
+              }
+            }
+
+            return headers;
+          }
+        delay-html-file-upload: true
+        incremental: ${{ inputs.incremental }}
