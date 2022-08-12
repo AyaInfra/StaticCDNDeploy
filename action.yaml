@@ -11,6 +11,7 @@ runs:
     - uses: Azure/login@v1
       with:
         creds: ${{ inputs.deploy-credentials }}
+        allow-no-subscriptions: true
     - uses: Azure/get-keyvault-secrets@v1
       with:
         keyvault: StaticCdnDeploySecrets
