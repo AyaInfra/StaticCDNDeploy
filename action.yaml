@@ -68,22 +68,20 @@ runs:
             fi
           done
         fi
-
-        echo "::set-output commit-hash=$(git rev-parse HEAD)"
       env:
         TZ: Asia/Shanghai
         LOCAL_PATH: ${{ inputs.local-path }}
         REMOTE_PATH: ${{ inputs.remote-path }}
         WORKING_DIR: ${{ inputs.working-dir }}
         DEPLOY_KEY: ${{ steps.secrets.outputs.deploy-key-static-cdn }}
-      id: push-changes
-    - name: Await Cloudflare Deploy
-      uses: WalshyDev/cf-pages-await@v1.3.0
+    - name: Deploy to Cloudflare Pages
+      uses: Menci/pages-action@main
       with:
         accountId: ${{ steps.secrets.outputs.cloudflare-account-id }}
         apiToken: ${{ steps.secrets.outputs.cloudflare-token }}
-        project: menci-static-cdn
-        commitHash: ${{ steps.push-changes.outputs.commit-hash }}
+        projectName: menci-static-cdn
+        directory: ${{ inputs.working-dir }}/content
+        branch: main
     - name: Deploy to Aliyun
       uses: Menci/upload-to-oss@main
       with:
