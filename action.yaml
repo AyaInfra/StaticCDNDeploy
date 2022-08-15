@@ -15,7 +15,7 @@ runs:
     - uses: Azure/get-keyvault-secrets@v1
       with:
         keyvault: StaticCdnDeploySecrets
-        secrets: aliyun-oss-access-key-id,aliyun-oss-access-key-secret,aliyun-oss-bucket,aliyun-oss-endpoint,cloudflare-account-id,cloudflare-token,deploy-key-static-cdn,deploy-key-static-cdn-configuration
+        secrets: aliyun-oss-access-key-id,aliyun-oss-access-key-secret,aliyun-oss-bucket,aliyun-oss-endpoint,cloudflare-account-id,cloudflare-token,deploy-key-static-cdn,deploy-key-static-cdn-configuration,vps-key,vps-ip
       id: secrets
     - name: Checkout CDN content
       uses: actions/checkout@v2
@@ -155,3 +155,12 @@ runs:
           }
         delay-html-file-upload: true
         incremental: ${{ inputs.incremental }}
+    - name: Deploy to VPS
+      shell: bash
+      run: |
+        eval `ssh-agent -s`
+        echo "$VPS_KEY" | tr -d '\r' | ssh-add -
+        ssh -o StrictHostKeyChecking=no -o LogLevel=ERROR -o UserKnownHostsFile=/dev/null "root@$VPS_IP"
+      env:
+        VPS_KEY: ${{ steps.secrets.outputs.vps-key }}
+        VPS_IP: ${{ steps.secrets.outputs.vps-ip }}
